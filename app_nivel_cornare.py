@@ -1,13 +1,3 @@
-"""
-App básica de Streamlit — Nivel de ríos/quebradas (CORNARE / MARCO)
---------------------------------------------------------------------
-Cada estudiante debe cambiar, como mínimo, el código de la estación
-en el sidebar. Los valores de fecha y calidad también son ajustables.
-
-Para correrla:
-    streamlit run app_nivel_cornare.py
-"""
-
 import requests
 import pandas as pd
 import numpy as np
@@ -16,10 +6,7 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ------------------------------------------------------------------
-# Coordenadas por defecto (Institución Universitaria Pascual Bravo)
-# Se usan solo si la API no trae la latitud/longitud de la estación.
-# ------------------------------------------------------------------
+# Coordenadas por defecto (I.U. Pascual Bravo)
 LAT_DEFECTO = 6.2766
 LON_DEFECTO = -75.5901
 
@@ -27,20 +14,31 @@ API_BASE_URL = "https://marco.cornare.gov.co/api/v1/estaciones"
 
 LLAVE_FECHA = "level_date"
 LLAVE_VALOR = "level"
-CANDIDATOS_LAT = ["lat", "latitude", "latitud"]
-CANDIDATOS_LON = ["lng", "lon", "longitude", "longitud"]
+CANDIDATOS_LAT = ["lat", "latitude", "latitud", "y"]
+CANDIDATOS_LON = ["lng", "lon", "longitude", "longitud", "x"]
 
 st.set_page_config(page_title="Nivel de estación — CORNARE", page_icon="🌊", layout="wide")
-
 
 # ------------------------------------------------------------------
 # Funciones de consulta
 # ------------------------------------------------------------------
+def obtener_metadatos_estacion(codigo_estacion, timeout=15):
+    """Obtiene la información general de la estación (incluyendo latitud/longitud)."""
+    url = f"{API_BASE_URL}/{codigo_estacion}"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        resp = requests.get(url, headers=headers, timeout=timeout, verify=False)
+        if resp.status_code == 200:
+            return resp.json()
+    except requests.exceptions.RequestException:
+        pass
+    return None
+
 def obtener_serie_nivel(codigo_estacion, desde, hasta, calidad=1, timeout=30):
     url = f"{API_BASE_URL}/{codigo_estacion}/nivel"
     params = {"desde": desde, "hasta": hasta, "calidad": calidad}
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
         "Accept": "application/json, text/plain, */*",
     }
     try:
@@ -50,7 +48,6 @@ def obtener_serie_nivel(codigo_estacion, desde, hasta, calidad=1, timeout=30):
         return None, f"HTTP {resp.status_code}"
     except requests.exceptions.RequestException as e:
         return None, f"Error de red: {e}"
-
 
 def obtener_todas_las_paginas(datos_json, timeout=30):
     registros = list(datos_json.get("values", []))
@@ -67,25 +64,26 @@ def obtener_todas_las_paginas(datos_json, timeout=30):
         siguiente_url = pagina.get("next")
     return registros
 
-
-def detectar_coordenadas(datos_json):
-    """Busca lat/lon en las llaves raíz de la respuesta. Si no las encuentra, usa el valor por defecto."""
-    if not isinstance(datos_json, dict):
-        return LAT_DEFECTO, LON_DEFECTO, False
-
-    lat = next((datos_json[k] for k in CANDIDATOS_LAT if k in datos_json), None)
-    lon = next((datos_json[k] for k in CANDIDATOS_LON if k in datos_json), None)
-
+def extraer_coordenadas_dict(d):
+    """Recorre recursivamente o busca latitud/longitud en un diccionario."""
+    if not isinstance(d, dict):
+        return None, None
+    
+    lat = next((d[k] for k in CANDIDATOS_LAT if k in d and d[k] is not None), None)
+    lon = next((d[k] for k in CANDIDATOS_LON if k in d and d[k] is not None), None)
+    
+    # Si las coordenadas están dentro de un subobjeto como "location" o "geometry"
+    if (lat is None or lon is None) and "location" in d and isinstance(d["location"], dict):
+        return extraer_coordenadas_dict(d["location"])
+    
     if lat is not None and lon is not None:
         try:
-            return float(lat), float(lon), True
+            return float(lat), float(lon)
         except (TypeError, ValueError):
             pass
-    return LAT_DEFECTO, LON_DEFECTO, False
-
+    return None, None
 
 def calcular_indice_calidad(df):
-    """Índice simple (0-100) combinando completitud de la serie y proporción de outliers."""
     if df.empty or len(df) < 2:
         return 0.0, 0, 0
 
@@ -109,9 +107,8 @@ def calcular_indice_calidad(df):
     indice = (completitud * 0.7 + (1 - proporcion_outliers) * 0.3) * 100
     return round(indice, 1), int(huecos), int(es_outlier.sum())
 
-
 # ------------------------------------------------------------------
-# Sidebar — parámetros de la consulta (editables por cada estudiante)
+# Sidebar
 # ------------------------------------------------------------------
 st.sidebar.header("Parámetros de tu consulta")
 nombre_estudiante = st.sidebar.text_input("Nombre del estudiante", "Tu Nombre Aquí")
@@ -125,10 +122,19 @@ st.title("🌊 Nivel de ríos y quebradas — CORNARE")
 st.caption(f"Estudiante: **{nombre_estudiante}** · Estación: **{codigo_estacion}**")
 
 # ------------------------------------------------------------------
-# Consulta y procesamiento
+# Procesamiento
 # ------------------------------------------------------------------
 if consultar:
-    with st.spinner("Consultando la API..."):
+    with st.spinner("Consultando metadatos y series de la API..."):
+        # 1. Consultar metadatos para las coordenadas
+        meta_json = obtener_metadatos_estacion(codigo_estacion)
+        lat, lon = extraer_coordenadas_dict(meta_json)
+        coords_reales = lat is not None and lon is not None
+
+        if not coords_reales:
+            lat, lon = LAT_DEFECTO, LON_DEFECTO
+
+        # 2. Consultar serie de nivel
         datos_crudos, error = obtener_serie_nivel(codigo_estacion, fecha_desde, fecha_hasta, calidad)
 
     if error:
@@ -145,41 +151,34 @@ if consultar:
             df["nivel"] = pd.to_numeric(df["nivel"], errors="coerce")
             df = df.dropna(subset=["fecha", "nivel"]).sort_values("fecha").reset_index(drop=True)
 
-            lat, lon, coords_reales = detectar_coordenadas(datos_crudos)
             indice_calidad, huecos, n_outliers = calcular_indice_calidad(df)
 
-            # --- Métricas principales ---
+            # Metrics
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("Lecturas", len(df))
             col2.metric("Nivel promedio", f"{df['nivel'].mean():.2f}")
             col3.metric("Índice de calidad", f"{indice_calidad} / 100")
             col4.metric("Outliers detectados", n_outliers)
 
-            # --- Gráfico de la serie ---
+            # Serie
             st.subheader("Serie de nivel")
             st.line_chart(df.set_index("fecha")["nivel"])
 
-            # --- Mapa de la estación ---
+            # Mapa
             st.subheader("Ubicación de la estación")
             if not coords_reales:
-                st.caption("La API no trajo latitud/longitud de la estación — se muestra el punto de partida (Pascual Bravo). Ajusta `CANDIDATOS_LAT` / `CANDIDATOS_LON` si conoces el nombre real de esas llaves.")
-            st.map(pd.DataFrame({"lat": [lat], "lon": [lon]}), zoom=10)
+                st.caption("⚠️ La API no retornó coordenadas específicas para esta estación. Se muestra el punto predeterminado (Pascual Bravo).")
+            st.map(pd.DataFrame({"lat": [lat], "lon": [lon]}), zoom=12)
 
-            # --- Detalle de calidad ---
-            with st.expander("Detalle del índice de calidad"):
-                st.write(f"- Huecos de reporte detectados: **{huecos}**")
-                st.write(f"- Outliers (IQR + nivel negativo): **{n_outliers}** de {len(df)} lecturas")
-                st.write("El índice combina completitud de la serie (70%) y proporción de datos sin outliers (30%).")
-
-            # --- Tabla y descarga ---
+            # Tabla y descarga corregida
             with st.expander("Ver datos crudos"):
                 st.dataframe(df, use_container_width=True)
 
-            csv = df.to_csv(index=False).encode("utf-8")
-            csv = df.to_csv(index=False, sep=";", decimal=".").encode("utf-8-sig")
+            # Formato CSV adaptado a Excel (punto y coma como separador + codificación utf-8-sig)
+            csv_data = df.to_csv(index=False, sep=";", decimal=".").encode("utf-8-sig")
             st.download_button(
-                "⬇️ Descargar CSV (compatible con Excel)",
-                csv,
+                "⬇️ Descargar CSV (Formato Excel)",
+                csv_data,
                 file_name=f"nivel_estacion_{codigo_estacion}.csv",
                 mime="text/csv"
             )
