@@ -2,80 +2,81 @@ import requests
 import pandas as pd
 import numpy as np
 import streamlit as st
+import plotly.express as px
 import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Coordenadas por defecto (I.U. Pascual Bravo)
+# Configuración inicial
+st.set_page_config(
+    page_title="Nivel de Rios y Quebradas - CORNARE",
+    layout="wide"
+)
+
+# Parámetros fijos de la regla de negocio
+NOMBRE_ESTUDIANTE = "Cristian Camilo Rey Beltrán"
+CODIGO_ESTACION = "44"
+FECHA_DESDE = "2026-08-15"
+FECHA_HASTA = "2026-08-30"
+CALIDAD = 1
+
 LAT_DEFECTO = 6.2766
 LON_DEFECTO = -75.5901
-
 API_BASE_URL = "https://marco.cornare.gov.co/api/v1/estaciones"
 
-LLAVE_FECHA = "level_date"
-LLAVE_VALOR = "level"
 CANDIDATOS_LAT = ["lat", "latitude", "latitud", "y"]
 CANDIDATOS_LON = ["lng", "lon", "longitude", "longitud", "x"]
 
-st.set_page_config(page_title="Nivel de estación — CORNARE", page_icon="🌊", layout="wide")
-
-# ------------------------------------------------------------------
 # Funciones de consulta
-# ------------------------------------------------------------------
-def obtener_metadatos_estacion(codigo_estacion, timeout=15):
-    """Obtiene la información general de la estación (incluyendo latitud/longitud)."""
+@st.cache_data(ttl=600)
+def obtener_metadatos_estacion(codigo_estacion):
     url = f"{API_BASE_URL}/{codigo_estacion}"
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        resp = requests.get(url, headers=headers, timeout=timeout, verify=False)
+        resp = requests.get(url, headers=headers, timeout=10, verify=False)
         if resp.status_code == 200:
             return resp.json()
-    except requests.exceptions.RequestException:
+    except Exception:
         pass
     return None
 
-def obtener_serie_nivel(codigo_estacion, desde, hasta, calidad=1, timeout=30):
+@st.cache_data(ttl=600)
+def consultar_api_nivel(codigo_estacion, desde, hasta, calidad):
     url = f"{API_BASE_URL}/{codigo_estacion}/nivel"
     params = {"desde": desde, "hasta": hasta, "calidad": calidad}
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Accept": "application/json, text/plain, */*",
-    }
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+    
+    registros = []
     try:
-        resp = requests.get(url, params=params, headers=headers, timeout=timeout, verify=False)
-        if resp.status_code == 200:
-            return resp.json(), None
-        return None, f"HTTP {resp.status_code}"
-    except requests.exceptions.RequestException as e:
-        return None, f"Error de red: {e}"
-
-def obtener_todas_las_paginas(datos_json, timeout=30):
-    registros = list(datos_json.get("values", []))
-    siguiente_url = datos_json.get("next")
-    while siguiente_url:
-        try:
-            resp = requests.get(siguiente_url, timeout=timeout, verify=False)
-        except requests.exceptions.RequestException:
-            break
+        resp = requests.get(url, params=params, headers=headers, timeout=20, verify=False)
         if resp.status_code != 200:
-            break
-        pagina = resp.json()
-        registros.extend(pagina.get("values", []))
-        siguiente_url = pagina.get("next")
-    return registros
+            return None, f"HTTP {resp.status_code}"
+        
+        data = resp.json()
+        registros.extend(data.get("values", []))
+        
+        siguiente_url = data.get("next")
+        while siguiente_url:
+            r = requests.get(siguiente_url, headers=headers, timeout=20, verify=False)
+            if r.status_code == 200:
+                pag = r.json()
+                registros.extend(pag.get("values", []))
+                siguiente_url = pag.get("next")
+            else:
+                break
+        return registros, None
+    except Exception as e:
+        return None, str(e)
 
-def extraer_coordenadas_dict(d):
-    """Recorre recursivamente o busca latitud/longitud en un diccionario."""
+def extraer_coordenadas(d):
     if not isinstance(d, dict):
         return None, None
-    
     lat = next((d[k] for k in CANDIDATOS_LAT if k in d and d[k] is not None), None)
     lon = next((d[k] for k in CANDIDATOS_LON if k in d and d[k] is not None), None)
     
-    # Si las coordenadas están dentro de un subobjeto como "location" o "geometry"
     if (lat is None or lon is None) and "location" in d and isinstance(d["location"], dict):
-        return extraer_coordenadas_dict(d["location"])
-    
+        return extraer_coordenadas(d["location"])
+        
     if lat is not None and lon is not None:
         try:
             return float(lat), float(lon)
@@ -107,80 +108,92 @@ def calcular_indice_calidad(df):
     indice = (completitud * 0.7 + (1 - proporcion_outliers) * 0.3) * 100
     return round(indice, 1), int(huecos), int(es_outlier.sum())
 
-# ------------------------------------------------------------------
-# Sidebar
-# ------------------------------------------------------------------
-st.sidebar.header("Parámetros de tu consulta")
-nombre_estudiante = st.sidebar.text_input("Nombre del estudiante", "Tu Nombre Aquí")
-codigo_estacion = st.sidebar.text_input("Código de estación", "42")
-fecha_desde = st.sidebar.date_input("Desde", pd.to_datetime("2026-08-23")).strftime("%Y-%m-%d")
-fecha_hasta = st.sidebar.date_input("Hasta", pd.to_datetime("2026-08-30")).strftime("%Y-%m-%d")
-calidad = st.sidebar.selectbox("Calidad", [1, 0], index=0, help="1 = solo datos validados")
-consultar = st.sidebar.button("🔍 Consultar", type="primary")
+# Encabezado principal
+st.title("Nivel de Rios y Quebradas - CORNARE")
+st.write(f"Estudiante: {NOMBRE_ESTUDIANTE} | Estacion: {CODIGO_ESTACION} | Periodo: {FECHA_DESDE} al {FECHA_HASTA}")
+st.divider()
 
-st.title("🌊 Nivel de ríos y quebradas — CORNARE")
-st.caption(f"Estudiante: **{nombre_estudiante}** · Estación: **{codigo_estacion}**")
+# Consulta automatica
+with st.spinner("Cargando informacion de la estacion..."):
+    meta_json = obtener_metadatos_estacion(CODIGO_ESTACION)
+    lat, lon = extraer_coordenadas(meta_json)
+    coords_reales = lat is not None and lon is not None
+    if not coords_reales:
+        lat, lon = LAT_DEFECTO, LON_DEFECTO
 
-# ------------------------------------------------------------------
-# Procesamiento
-# ------------------------------------------------------------------
-if consultar:
-    with st.spinner("Consultando metadatos y series de la API..."):
-        # 1. Consultar metadatos para las coordenadas
-        meta_json = obtener_metadatos_estacion(codigo_estacion)
-        lat, lon = extraer_coordenadas_dict(meta_json)
-        coords_reales = lat is not None and lon is not None
+    registros, error = consultar_api_nivel(CODIGO_ESTACION, FECHA_DESDE, FECHA_HASTA, CALIDAD)
 
+if error:
+    st.error(f"Error al conectar con la API: {error}")
+elif not registros:
+    st.warning("No se encontraron registros para la estacion y periodo especificados.")
+else:
+    df = pd.DataFrame(registros)
+    df = df.rename(columns={"level_date": "fecha", "level": "nivel"})
+    df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
+    df["nivel"] = pd.to_numeric(df["nivel"], errors="coerce")
+    df = df.dropna(subset=["fecha", "nivel"]).sort_values("fecha").reset_index(drop=True)
+
+    indice_calidad, huecos, n_outliers = calcular_indice_calidad(df)
+
+    # Métricas principales
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Lecturas", f"{len(df):,}")
+    m2.metric("Nivel Promedio", f"{df['nivel'].mean():.2f} m")
+    m3.metric("Nivel Maximo", f"{df['nivel'].max():.2f} m")
+    m4.metric("Indice Calidad", f"{indice_calidad} / 100")
+    m5.metric("Outliers", n_outliers)
+
+    st.write("")
+
+    # Organizacion en pestañas
+    tab_grafico, tab_mapa, tab_datos = st.tabs([
+        "Serie Temporal", 
+        "Ubicacion Geografica", 
+        "Exportacion de Datos"
+    ])
+
+    with tab_grafico:
+        st.subheader("Grafico Historico de Nivel")
+        fig = px.line(
+            df, 
+            x="fecha", 
+            y="nivel", 
+            title=f"Estacion {CODIGO_ESTACION}",
+            labels={"fecha": "Fecha y Hora", "nivel": "Nivel (m)"},
+            template="plotly_white"
+        )
+        fig.update_traces(line_color="#1F77B4", line_width=2, fill="tozeroy", fillcolor="rgba(31, 119, 180, 0.1)")
+        fig.update_layout(
+            hovermode="x unified",
+            margin=dict(l=20, r=20, t=40, b=20)
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with tab_mapa:
+        st.subheader("Ubicacion de la Estacion")
         if not coords_reales:
-            lat, lon = LAT_DEFECTO, LON_DEFECTO
+            st.info("Coordenadas específicas no retornadas por la API. Se presenta mapa predeterminado.")
+        
+        map_df = pd.DataFrame({"lat": [lat], "lon": [lon]})
+        st.map(map_df, zoom=12)
 
-        # 2. Consultar serie de nivel
-        datos_crudos, error = obtener_serie_nivel(codigo_estacion, fecha_desde, fecha_hasta, calidad)
-
-    if error:
-        st.error(f"❌ {error}")
-    else:
-        registros = obtener_todas_las_paginas(datos_crudos)
-
-        if not registros:
-            st.warning("No hay registros para esta estación y rango de fechas. Prueba otro código u otro rango.")
-        else:
-            df = pd.DataFrame(registros)
-            df = df.rename(columns={LLAVE_FECHA: "fecha", LLAVE_VALOR: "nivel"})
-            df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
-            df["nivel"] = pd.to_numeric(df["nivel"], errors="coerce")
-            df = df.dropna(subset=["fecha", "nivel"]).sort_values("fecha").reset_index(drop=True)
-
-            indice_calidad, huecos, n_outliers = calcular_indice_calidad(df)
-
-            # Metrics
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Lecturas", len(df))
-            col2.metric("Nivel promedio", f"{df['nivel'].mean():.2f}")
-            col3.metric("Índice de calidad", f"{indice_calidad} / 100")
-            col4.metric("Outliers detectados", n_outliers)
-
-            # Serie
-            st.subheader("Serie de nivel")
-            st.line_chart(df.set_index("fecha")["nivel"])
-
-            # Mapa
-            st.subheader("Ubicación de la estación")
-            if not coords_reales:
-                st.caption("⚠️ La API no retornó coordenadas específicas para esta estación. Se muestra el punto predeterminado (Pascual Bravo).")
-            st.map(pd.DataFrame({"lat": [lat], "lon": [lon]}), zoom=12)
-
-            # Tabla y descarga corregida
-            with st.expander("Ver datos crudos"):
-                st.dataframe(df, use_container_width=True)
-
-            # Formato CSV adaptado a Excel (punto y coma como separador + codificación utf-8-sig)
+    with tab_datos:
+        st.subheader("Registros Obtenidos")
+        col_tabla, col_descarga = st.columns([3, 1])
+        
+        with col_tabla:
+            st.dataframe(df, use_container_width=True, height=350)
+            
+        with col_descarga:
+            st.write("Descargar CSV optimizado para Excel:")
             csv_data = df.to_csv(index=False, sep=";", decimal=".").encode("utf-8-sig")
             st.download_button(
-                "⬇️ Descargar CSV (Formato Excel)",
-                csv_data,
-                file_name=f"nivel_estacion_{codigo_estacion}.csv",
-                mime="text/csv"
+                label="Descargar CSV",
+                data=csv_data,
+                file_name=f"estacion_{CODIGO_ESTACION}_{FECHA_DESDE}_a_{FECHA_HASTA}.csv",
+                mime="text/csv",
+                use_container_width=True
             )
-else:
-    st.info("Ajusta los parámetros en el sidebar y presiona **Consultar**.")
+            st.write(f"- Huecos detectados: {huecos}")
+            st.write(f"- Outliers detectados: {n_outliers}")
