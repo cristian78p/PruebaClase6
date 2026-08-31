@@ -176,6 +176,12 @@ if consultar:
                 st.dataframe(df, use_container_width=True)
 
             csv = df.to_csv(index=False).encode("utf-8")
-            st.download_button("⬇️ Descargar CSV", csv, file_name=f"nivel_estacion_{codigo_estacion}.csv", mime="text/csv")
+            csv = df.to_csv(index=False, sep=";", decimal=".").encode("utf-8-sig")
+            st.download_button(
+                "⬇️ Descargar CSV (compatible con Excel)",
+                csv,
+                file_name=f"nivel_estacion_{codigo_estacion}.csv",
+                mime="text/csv"
+            )
 else:
     st.info("Ajusta los parámetros en el sidebar y presiona **Consultar**.")
