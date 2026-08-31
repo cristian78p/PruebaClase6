@@ -15,7 +15,7 @@ st.set_page_config(
 
 # Parámetros fijos de la regla de negocio
 NOMBRE_ESTUDIANTE = "Cristian Camilo Rey Beltrán"
-CODIGO_ESTACION = "44"
+CODIGO_ESTACION = "42"
 FECHA_DESDE = "2026-08-15"
 FECHA_HASTA = "2026-08-30"
 CALIDAD = 1
